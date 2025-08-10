@@ -19,8 +19,11 @@ import {
 } from "./virtuality/Motion";
 import GeoRadar from "./map/GeoRadar";
 import OpenWeatherMap from "./map/OpenWeatherMap";
+import FloodRiskAPI from "./map/FloodRiskAPI";
 import WeatherComposition from "./types/WeatherComposition";
 import WeatherForecastCard from "./components/WeatherForecastCard.vue";
+import FloodRiskCard from "./components/FloodRiskCard.vue";
+import HistoricalDataChart from "./components/HistoricalDataChart.vue";
 
 const isMobile = (function () {
   const regex =
@@ -30,6 +33,8 @@ const isMobile = (function () {
 const canvasContainerRef = ref();
 const cameraControlIconRef = ref();
 const weatherPopupRef = ref();
+const floodRiskPopupRef = ref();
+const historicalChartPopupRef = ref();
 const searchTermRef = ref("");
 const weatherForecastViewDataRef = ref();
 
@@ -52,11 +57,34 @@ const state = reactive({
     weatherDescription: "",
     weatherParameterGroup: "",
   },
+  floodRiskData: {
+    location: "",
+    flood_risk: "",
+    water_level: 0,
+    rainfall_mm: 0,
+    soil_moisture: 0,
+    temp: 0,
+    humidity: 0,
+    timestamp: "",
+    coordinates: { lat: 0, lon: 0 }
+  },
+  riskZones: { zones: [] },
+  historicalData: [],
   openWeatherInterface: {
     errorState: "",
     asyncLoading: false,
   },
+  floodRiskInterface: {
+    errorState: "",
+    asyncLoading: false,
+  },
+  historicalInterface: {
+    errorState: "",
+    asyncLoading: false,
+  },
   smallScreen: isMobile && innerWidth < 1024,
+  showFloodRisk: false,
+  showHistoricalChart: false,
 });
 // a computed ref
 const relevanceResultVisible = computed(() => {
@@ -110,15 +138,20 @@ async function onVRMarkerFocus(id) {
   if (id && utils.isAlreadyLocationMarked(id)) {
     state.activeVRMarkerID = id;
     state.openWeatherInterface.errorState = "";
+    state.floodRiskInterface.errorState = "";
+    
     const weatherPopupHTMLElement = weatherPopupRef.value;
     const { position } =
       vrSpace.selectVirtualMarker(
         state.activeVRMarkerID,
         weatherPopupHTMLElement
       ) || {};
+      
     if (position) {
       startCameraMovement(position);
       let { coord } = utils.getSelectedLocation(state.activeVRMarkerID);
+      
+      // Fetch weather data
       state.openWeatherInterface.asyncLoading = true;
       try {
         const { id, main, name, sys, visibility, weather, wind, timezone, dt } =
@@ -161,6 +194,32 @@ async function onVRMarkerFocus(id) {
       } finally {
         state.openWeatherInterface.asyncLoading = false;
       }
+      
+      // Fetch flood risk data
+      state.floodRiskInterface.asyncLoading = true;
+      try {
+        const floodData = await FloodRiskAPI.fetchFloodRiskData(coord.lat, coord.lon);
+        const riskZones = await FloodRiskAPI.fetchRiskZones(coord.lat, coord.lon);
+        
+        state.floodRiskData = {
+          ...floodData,
+          location: name || "Unknown Location"
+        };
+        state.riskZones = riskZones;
+        
+        // Update location with flood risk info
+        utils.partialWeatherUpdate(state.activeVRMarkerID, {
+          floodRisk: floodData.flood_risk,
+          waterLevel: floodData.water_level
+        });
+        
+      } catch (error) {
+        state.floodRiskInterface.errorState = error.name
+          ? error.name + error.message
+          : "flood risk data error";
+      } finally {
+        state.floodRiskInterface.asyncLoading = false;
+      }
     }
   }
 }
@@ -168,6 +227,76 @@ async function onVRMarkerFocus(id) {
 onMounted(() => {
   VRSetup();
 });
+
+// Flood risk and historical data functions
+async function fetchHistoricalData(period = 7) {
+  if (!state.activeVRMarkerID) return;
+  
+  const location = utils.getSelectedLocation(state.activeVRMarkerID);
+  if (!location) return;
+  
+  state.historicalInterface.asyncLoading = true;
+  state.historicalInterface.errorState = "";
+  
+  try {
+    const historicalData = await FloodRiskAPI.fetchHistoricalData(
+      location.name, 
+      period
+    );
+    state.historicalData = historicalData;
+  } catch (error) {
+    state.historicalInterface.errorState = error.name
+      ? error.name + error.message
+      : "historical data error";
+  } finally {
+    state.historicalInterface.asyncLoading = false;
+  }
+}
+
+function showFloodRiskPanel() {
+  state.showFloodRisk = true;
+  state.showHistoricalChart = false;
+}
+
+function showHistoricalChart() {
+  state.showHistoricalChart = true;
+  state.showFloodRisk = false;
+  fetchHistoricalData();
+}
+
+function closeFloodRiskPanel() {
+  state.showFloodRisk = false;
+}
+
+function closeHistoricalChart() {
+  state.showHistoricalChart = false;
+}
+
+function onHistoricalPeriodChanged(period) {
+  fetchHistoricalData(period);
+}
+
+function getRiskColor(risk) {
+  switch (risk) {
+    case 'Low':
+      return 'text-green-400';
+    case 'Moderate':
+      return 'text-yellow-400';
+    case 'High':
+      return 'text-orange-400';
+    case 'Critical':
+      return 'text-red-400';
+    default:
+      return 'text-gray-400';
+  }
+}
+
+function showRiskZones() {
+  // This would integrate with the 3D globe to show risk zones
+  // For now, we'll just show a message
+  console.log('Showing risk zones on globe');
+  // TODO: Implement 3D risk zone visualization
+}
 
 watch(searchTermRef, async (newTerms) => {
   if (newTerms && newTerms.length >= 3) {
@@ -284,6 +413,11 @@ watch(searchTermRef, async (newTerms) => {
                   {{ location.weatherDescription }}
                 </p>
               </template>
+              <template v-if="location.floodRisk">
+                <p class="mt-1 text-xs leading-5" :class="getRiskColor(location.floodRisk)">
+                  🌊 Flood Risk: {{ location.floodRisk }}
+                </p>
+              </template>
             </div>
             <div class="hidden shrink-0 sm:flex sm:flex-col sm:items-end">
               <img
@@ -329,6 +463,34 @@ watch(searchTermRef, async (newTerms) => {
       ref="canvasContainerRef"
     >
       <canvas></canvas>
+      
+      <!-- Flood Risk Toggle Button -->
+      <div 
+        v-if="state.activeVRMarkerID && !state.showFloodRisk && !state.showHistoricalChart"
+        class="absolute top-4 right-4 z-50"
+      >
+        <button
+          @click="showFloodRiskPanel"
+          class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-6 rounded-lg shadow-lg flex items-center space-x-2"
+        >
+          <FontAwesomeIcon :icon="['fas', 'water']" />
+          <span>Flood Risk</span>
+        </button>
+      </div>
+      
+      <!-- Weather Toggle Button -->
+      <div 
+        v-if="state.activeVRMarkerID && (state.showFloodRisk || state.showHistoricalChart)"
+        class="absolute top-4 right-4 z-50"
+      >
+        <button
+          @click="closeFloodRiskPanel"
+          class="bg-green-600 hover:bg-green-700 text-white font-bold py-3 px-6 rounded-lg shadow-lg flex items-center space-x-2"
+        >
+          <FontAwesomeIcon :icon="['fas', 'cloud-sun']" />
+          <span>Weather</span>
+        </button>
+      </div>
     </div>
     <div
       ref="weatherPopupRef"
@@ -340,6 +502,41 @@ watch(searchTermRef, async (newTerms) => {
         :openWeatherLoadingErrorMsg="state.openWeatherInterface.errorState"
         :asyncLoading="state.openWeatherInterface.asyncLoading"
       ></WeatherForecastCard>
+    </div>
+    
+    <!-- Flood Risk Panel -->
+    <div
+      v-if="state.showFloodRisk"
+      ref="floodRiskPopupRef"
+      class="bg-black bg-opacity-20 fixed rounded"
+      style="display: block; z-index: 1000;"
+    >
+      <FloodRiskCard
+        :floodRiskData="state.floodRiskData"
+        :riskZones="state.riskZones"
+        :floodLoadingErrorMsg="state.floodRiskInterface.errorState"
+        :asyncLoading="state.floodRiskInterface.asyncLoading"
+        :locationName="state.floodRiskData.location"
+        @showHistorical="showHistoricalChart"
+        @showRiskZones="showRiskZones"
+      ></FloodRiskCard>
+    </div>
+    
+    <!-- Historical Data Chart -->
+    <div
+      v-if="state.showHistoricalChart"
+      ref="historicalChartPopupRef"
+      class="bg-black bg-opacity-20 fixed rounded"
+      style="display: block; z-index: 1000;"
+    >
+      <HistoricalDataChart
+        :historicalData="state.historicalData"
+        :historicalLoadingErrorMsg="state.historicalInterface.errorState"
+        :asyncLoading="state.historicalInterface.asyncLoading"
+        :locationName="state.floodRiskData.location"
+        @close="closeHistoricalChart"
+        @periodChanged="onHistoricalPeriodChanged"
+      ></HistoricalDataChart>
     </div>
     <div
       ref="cameraControlIconRef"
